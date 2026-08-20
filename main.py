@@ -21,11 +21,11 @@ def run_flask():
   app.run(host="0.0.0.0", port=port)
 
 
-# --- Discordボット設定 ---
+# --- Discordボット設定（スラッシュコマンド対応） ---
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
 CONFIG_FILE = "channel_id.txt"
 
@@ -125,13 +125,11 @@ def judge_pressure_daily(diff):
     return "5🔴"
 
 
-def generate_weather_embeds():
-  # Open-Meteo API（3日分のデータを取得するため daily の日数等を拡張）
+# --- 1. 3日分の天気予報生成（毎日6:00配信） ---
+def generate_weather_forecast_embeds():
   url = (
       "https://api.open-meteo.com/v1/forecast?latitude=35.3&longitude=139.375&"
-      "current=temperature_2m,relative_humidity_2m,pressure_msl&"
-      "hourly=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,"
-      "wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,snowfall&"
+      "hourly=temperature_2m,relative_humidity_2m,weather_code,pressure_msl&"
       "daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum&"
       "timezone=Asia/Tokyo"
   )
@@ -140,16 +138,12 @@ def generate_weather_embeds():
 
   jst = timezone(timedelta(hours=9))
   now_jst = datetime.now(jst)
-
-  daily_times = data["daily"]["time"]  # 今日・明日・あさって等の配列
+  daily_times = data["daily"]["time"]
 
   embeds = []
-
-  # --- 1. 概要 Embed (オレンジ色・今日、明日、あさっての3日分を1つにまとめる) ---
   embed1 = discord.Embed(title="3日間天気予報 概要", color=discord.Color.orange())
 
   overview_texts = []
-  # 0:今日, 1:明日, 2:あさって の3日分を作成
   day_labels = ["今日", "明日", "あさって"]
 
   for day_idx in range(min(3, len(daily_times))):
@@ -162,10 +156,8 @@ def generate_weather_embeds():
     total_precip = data["daily"].get("precipitation_sum", [0])[day_idx]
     total_snow = data["daily"].get("snowfall_sum", [0])[day_idx]
 
-    # その日の24時間のインデックス範囲 (day_idx * 24 から 24時間)
     start_h = day_idx * 24
     end_h = start_h + 24
-
     day_hums = data["hourly"]["relative_humidity_2m"][start_h:end_h]
     day_pressures = data["hourly"]["pressure_msl"][start_h:end_h]
     day_codes = data["hourly"]["weather_code"][start_h:end_h]
@@ -180,7 +172,6 @@ def generate_weather_embeds():
         else 0
     )
 
-    # 情報（真冬日、冬日、夏日、真夏日、猛暑日、酷暑日、熱帯夜）
     info_tags = []
     if max_temp >= 35.0:
       info_tags.append("猛暑日")
@@ -199,7 +190,6 @@ def generate_weather_embeds():
 
     main_weather_emoji = get_weather_emoji(day_codes[0] if day_codes else 0)
 
-    # 気圧変化
     day_diffs = [
         0.0 if i == 0 else round(day_pressures[i] - day_pressures[i - 1], 1)
         for i in range(len(day_pressures))
@@ -231,7 +221,6 @@ def generate_weather_embeds():
     lowest_diff = min(day_diffs) if day_diffs else 0.0
     max_alert_level = judge_pressure_hourly(lowest_diff)
 
-    # ご指定のシンプルで見やすい3行形式
     block_text = (
         f"**{label}({d_dt.strftime('%m月%d日')})の天気予報**\n"
         f"天気: 晴れときどき曇り {main_weather_emoji}\n"
@@ -240,7 +229,7 @@ def generate_weather_embeds():
         f"降水量: {total_precip}mm｜降雪量: {total_snow}cm｜情報: {info_str}\n"
         f"最大気圧: {max_press}hPa｜最低気圧: {min_press}hPa｜平均気圧:"
         f" {avg_press}hPa\n\n"
-        f"今日の最大警戒レベル: {max_alert_level[0]}\n"  # 絵文字の数字部分や記号
+        f"今日の最大警戒レベル: {max_alert_level[0]}\n"
         f"最大変化[時間,低下]: {max_drop_str}\n"
         f"最大変化[時間,増加]: {max_rise_str}\n"
         f"最大変化[今日]: {max_daily_str}"
@@ -250,12 +239,35 @@ def generate_weather_embeds():
   embed1.description = "\n\n".join(overview_texts)
   embed1.set_footer(text=f"{now_jst.strftime('%Y年%m月%d日 %H:%M')} 時点")
   embeds.append(embed1)
+  return embeds
 
-  # --- 2. 時間ごとの天気（今日の分をコードブロック等を用いて綺麗に3列に並べる） ---
-  # 画像のようにきれいに整列させるため、Markdownのコードブロックを活用します
-  def build_clean_columns(start_hour, end_hour):
-    hours_data = []
-    for idx in range(start_hour, end_hour):
+
+# --- 2. 今日の1時間予報生成（毎日0:00配信） ---
+def generate_today_hourly_embeds():
+  url = (
+      "https://api.open-meteo.com/v1/forecast?latitude=35.3&longitude=139.375&"
+      "hourly=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,"
+      "wind_speed_10m,wind_direction_10m,precipitation&"
+      "timezone=Asia/Tokyo"
+  )
+  res = requests.get(url)
+  data = res.json()
+
+  jst = timezone(timedelta(hours=9))
+  now_jst = datetime.now(jst)
+
+  pressures = data["hourly"]["pressure_msl"][0:24]
+  hourly_diffs = [
+      0.0 if i == 0 else round(pressures[i] - pressures[i - 1], 1)
+      for i in range(24)
+  ]
+
+  embeds = []
+
+  # Embedフィールドを使ってきれいに整理して配置する関数
+  def create_hourly_embed(title, color, start_h, end_h):
+    emb = discord.Embed(title=title, color=color)
+    for idx in range(start_h, end_h):
       t_str = f"{idx:02d}:00"
       emoji = get_weather_emoji(data["hourly"]["weather_code"][idx])
       temp = data["hourly"]["temperature_2m"][idx]
@@ -263,43 +275,32 @@ def generate_weather_embeds():
       precip = data["hourly"]["precipitation"][idx]
       wind_spd = data["hourly"]["wind_speed_10m"][idx]
       wind_d = get_wind_direction(data["hourly"]["wind_direction_10m"][idx])
+      diff = hourly_diffs[idx]
+      level = judge_pressure_hourly(diff)
 
-      hours_data.append({
-          "time": t_str,
-          "emoji": emoji,
-          "temp": f"{temp}°C",
-          "hum": f"{hum}%",
-          "precip": f"{precip}mm",
-          "wind": f"{wind_d} {wind_spd}m/s",
-      })
+      field_value = (
+          f"天気: {emoji}\n"
+          f"気温: {temp}°C\n"
+          f"湿度: {hum}%\n"
+          f"降水: {precip}mm\n"
+          f"風向風速: {wind_d} {wind_spd}m/s\n"
+          f"気圧変化: {level}({diff:+.1f}hPa)"
+      )
+      emb.add_field(name=t_str, value=field_value, inline=True)
+    return emb
 
-    # 3つずつ並べたテーブル風レイアウトを作成
-    lines = []
-    for i in range(0, len(hours_data), 3):
-      chunk = hours_data[i : i + 3]
-      # 1行目: 時間と絵文字
-      line_t = " | ".join(f"{c['time']} {c['emoji']}" for c in chunk)
-      # 2行目: 気温・湿度
-      line_th = " | ".join(f"気温:{c['temp']} 湿:{c['hum']}" for c in chunk)
-      # 3行目: 降水量
-      line_p = " | ".join(f"降水:{c['precip']}" for c in chunk)
-      # 4行目: 風
-      line_w = " | ".join(f"風:{c['wind']}" for c in chunk)
+  # 午前 (0:00〜11:00) - 緑
+  embed_am = create_hourly_embed(
+      "【今日の1時間予報】午前 (00:00 - 11:00)", discord.Color.green(), 0, 12
+  )
+  embeds.append(embed_am)
 
-      lines.append(f"{line_t}\n{line_th}\n{line_p}\n{line_w}")
-      lines.append("-" * 32)  #ミア仕切り
-
-    return "```\n" + "\n".join(lines) + "\n```"
-
-  # 午前 Embed (緑)
-  embed2 = discord.Embed(title="【午前】(00:00 - 11:00)", color=discord.Color.green())
-  embed2.description = build_clean_columns(0, 12)
-  embeds.append(embed2)
-
-  # 午後 Embed (青)
-  embed3 = discord.Embed(title="【午後】(12:00 - 23:00)", color=discord.Color.blue())
-  embed3.description = build_clean_columns(12, 24)
-  embeds.append(embed3)
+  # 午後 (12:00〜23:00) - 青
+  embed_pm = create_hourly_embed(
+      "【今日の1時間予報】午後 (12:00 - 23:00)", discord.Color.blue(), 12, 24
+  )
+  embed_pm.set_footer(text=f"{now_jst.strftime('%Y年%m月%d日 %H:%M')} 時点")
+  embeds.append(embed_pm)
 
   return embeds
 
@@ -308,21 +309,44 @@ def generate_weather_embeds():
 async def on_ready():
   print(f"ログインしました: {bot.user.name}")
   daily_weather_task.start()
+  hourly_weather_task.start()
+  try:
+    await bot.tree.sync()
+    print("スラッシュコマンドを同期しました。")
+  except Exception as e:
+    print(f"同期エラー: {e}")
 
 
-@tasks.loop(hours=24)
+# 毎日6:00に3日分の天気予報を配信
+@tasks.loop(time=datetime.strptime("06:00", "%H:%M").time())
 async def daily_weather_task():
   channel_id = load_channel_id()
   if channel_id:
     channel = bot.get_channel(channel_id)
     if channel:
       try:
-        embeds = generate_weather_embeds()
+        embeds = generate_weather_forecast_embeds()
         for emb in embeds:
           await channel.send(embed=emb)
           time.sleep(1)
       except Exception as e:
-        print(f"自動送信エラー: {e}")
+        print(f"自動送信エラー(6:00): {e}")
+
+
+# 毎日0:00に今日の1時間予報を配信
+@tasks.loop(time=datetime.strptime("00:00", "%H:%M").time())
+async def hourly_weather_task():
+  channel_id = load_channel_id()
+  if channel_id:
+    channel = bot.get_channel(channel_id)
+    if channel:
+      try:
+        embeds = generate_today_hourly_embeds()
+        for emb in embeds:
+          await channel.send(embed=emb)
+          time.sleep(1)
+      except Exception as e:
+        print(f"自動送信エラー(0:00): {e}")
 
 
 @bot.command(name="天気設定")
@@ -341,26 +365,40 @@ async def unset_channel(ctx):
   await ctx.send("🚫 通知設定を解除しました。")
 
 
-@bot.command(name="天気テスト")
-async def test_weather(ctx):
-  await ctx.send("🔍 テスト生成中（3日分概要＆3列レイアウト）...")
+# スラッシュコマンド: /test_yohou
+@bot.tree.command(name="test_yohou", description="3日分の天気予報をテスト送信します")
+async def slash_test_yohou(interaction: discord.Interaction):
+  await interaction.response.send_message(
+      "🔍 3日分の天気予報を生成中...", ephemeral=True
+  )
   try:
-    embeds = generate_weather_embeds()
+    embeds = generate_weather_forecast_embeds()
     for emb in embeds:
-      try:
-        await ctx.send(embed=emb)
-        time.sleep(1)
-      except discord.HTTPException as he:
-        if he.status == 429:
-          await ctx.send(
-              "⚠️ 速度制限（429）を検知しました。少し待ってから再送します..."
-          )
-          time.sleep(5)
-          await ctx.send(embed=emb)
-        else:
-          raise he
+      await interaction.channel.send(embed=emb)
+      time.sleep(1)
   except Exception as e:
-    await ctx.send(f"❌ エラーが発生しました: {e}")
+    await interaction.followup.send(
+        f"❌ エラーが発生しました: {e}", ephemeral=True
+    )
+
+
+# スラッシュコマンド: /test_today
+@bot.tree.command(
+    name="test_today", description="今日の1時間予報をテスト送信します"
+)
+async def slash_test_today(interaction: discord.Interaction):
+  await interaction.response.send_message(
+      "🔍 今日の1時間予報を生成中...", ephemeral=True
+  )
+  try:
+    embeds = generate_today_hourly_embeds()
+    for emb in embeds:
+      await interaction.channel.send(embed=emb)
+      time.sleep(1)
+  except Exception as e:
+    await interaction.followup.send(
+        f"❌ エラーが発生しました: {e}", ephemeral=True
+    )
 
 
 if __name__ == "__main__":
