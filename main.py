@@ -1,11 +1,28 @@
 from datetime import datetime
 import os
+import threading
 import time
+from flask import Flask
 import discord
 from discord.ext import commands, tasks
 import requests
 
-# インテントの設定
+# --- Flaskサーバー設定（Renderのポート対策） ---
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+  return "Your service is live! Discord Bot is running."
+
+
+def run_flask():
+  # Renderが割り当てるPORT環境変数（デフォルトは10000）を使用
+  port = int(os.environ.get("PORT", 10000))
+  app.run(host="0.0.0.0", port=port)
+
+
+# --- Discordボット設定 ---
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -29,7 +46,6 @@ def save_channel_id(channel_id):
     f.write(str(channel_id))
 
 
-# 警戒レベルの判定関数（ご指定のルールに基づく）
 def judge_pressure_hourly(diff):
   if diff >= 2.0:
     return "🟣"  # 上昇注意
@@ -60,7 +76,6 @@ def get_weather_emoji(wmo_code):
     return "🌤"
 
 
-# 3つのメッセージに分割してリストで返す関数
 def generate_weather_report_parts():
   url = "https://api.open-meteo.com/v1/forecast?latitude=35.3&longitude=139.375&current=temperature_2m,relative_humidity_2m,pressure_msl&hourly=temperature_2m,relative_humidity_2m,weather_code,pressure_msl&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=Asia/Tokyo"
   res = requests.get(url)
@@ -78,7 +93,6 @@ def generate_weather_report_parts():
   min_press = min(pressures)
   avg_press = round(sum(pressures) / len(pressures), 1)
 
-  # --- パート1: 今日の概要 ---
   part1 = []
   part1.append(f"**今日({target_date.strftime('%m月%d日')})の天気予報**")
   part1.append(
@@ -94,7 +108,6 @@ def generate_weather_report_parts():
   part1.append("最大変化[時間,増加]: 1🔵(+0.8hPa, 19時と20時の間)")
   part1.append("最大変化[今日]: 2🟢(-2.2hPa)")
 
-  # 1時間ごとのデータ配列作成
   hourly_times = data["hourly"]["time"]
   temps = data["hourly"]["temperature_2m"]
   hums = data["hourly"]["relative_humidity_2m"]
@@ -116,10 +129,7 @@ def generate_weather_report_parts():
       )
     return "\n\n".join(block)
 
-  # --- パート2: 午前 (0:00〜11:00) ---
   part2 = f"__**【午前】**__\n\n" + build_hourly_block(0, 12)
-
-  # --- パート3: 午後 (12:00〜23:00 ＋ 時点フッター) ---
   part3_content = build_hourly_block(12, 24)
   footer = f"\n\n_{datetime.now().strftime('%Y年%m月%d日 %H:%M')} 時点_"
   part3 = f"__**【午後】**__\n\n" + part3_content + footer
@@ -143,7 +153,7 @@ async def daily_weather_task():
         parts = generate_weather_report_parts()
         for part in parts:
           await channel.send(part)
-          time.sleep(1)  # レートリミット対策のウェイト
+          time.sleep(1)
       except Exception as e:
         print(f"自動送信エラー: {e}")
 
@@ -166,29 +176,35 @@ async def unset_channel(ctx):
 
 @bot.command(name="天気テスト")
 async def test_weather(ctx):
-  """分割してテスト送信します（429エラー対策つき）"""
   await ctx.send("🔍 テスト生成中（3件に分けて送信します）...")
   try:
     parts = generate_weather_report_parts()
-    for index, part in enumerate(parts):
+    for part in parts:
       try:
         await ctx.send(part)
-        time.sleep(1)  # 連続送信による制限（429）を回避するためのウェイト
+        time.sleep(1)
       except discord.HTTPException as he:
         if he.status == 429:
           await ctx.send(
               "⚠️ 速度制限（429）を検知しました。少し待ってから再送します..."
           )
           time.sleep(5)
-          await ctx.send(part)  # 失敗したところから再送
+          await ctx.send(part)
         else:
           raise he
   except Exception as e:
     await ctx.send(f"❌ エラーが発生しました: {e}")
 
 
-token = os.environ.get("DISCORD_TOKEN")
-if not token:
-  print("エラー: DISCORD_TOKEN が設定されていません。")
-else:
-  bot.run(token)
+if __name__ == "__main__":
+  # Flaskを別スレッドで起動（ポートを塞ぐため）
+  flask_thread = threading.Thread(target=run_flask)
+  flask_thread.daemon = True
+  flask_thread.start()
+
+  # Discordボットを起動
+  token = os.environ.get("DISCORD_TOKEN")
+  if not token:
+    print("エラー: DISCORD_TOKEN が設定されていません。")
+  else:
+    bot.run(token)
