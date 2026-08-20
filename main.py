@@ -45,7 +45,6 @@ def save_channel_id(channel_id):
     f.write(str(channel_id))
 
 
-# 風向の度数を方角（16方位など簡易）に変換
 def get_wind_direction(deg):
   if deg is None:
     return "不明"
@@ -71,7 +70,6 @@ def get_wind_direction(deg):
   return dirs[idx]
 
 
-# 天気絵文字判定
 def get_weather_emoji(wmo_code):
   if wmo_code == 0:
     return "☀️"
@@ -97,7 +95,6 @@ def get_weather_emoji(wmo_code):
     return "🌤"
 
 
-# 気圧変化レベル判定
 def judge_pressure_hourly(diff):
   if diff >= 2.0:
     return "🟣"
@@ -129,7 +126,7 @@ def judge_pressure_daily(diff):
 
 
 def generate_weather_embeds():
-  # Open-Meteo API（風速・風向・雲量・降水量・降雪量を追加取得）
+  # Open-Meteo API（3日分のデータを取得するため daily の日数等を拡張）
   url = (
       "https://api.open-meteo.com/v1/forecast?latitude=35.3&longitude=139.375&"
       "current=temperature_2m,relative_humidity_2m,pressure_msl&"
@@ -144,139 +141,167 @@ def generate_weather_embeds():
   jst = timezone(timedelta(hours=9))
   now_jst = datetime.now(jst)
 
-  target_date_str = data["daily"]["time"][0]
-  target_date = datetime.strptime(target_date_str, "%Y-%m-%d")
+  daily_times = data["daily"]["time"]  # 今日・明日・あさって等の配列
 
-  max_temp = data["daily"]["temperature_2m_max"][0]
-  min_temp = data["daily"]["temperature_2m_min"][0]
-  total_precip = data["daily"].get("precipitation_sum", [0])[0]
-  total_snow = data["daily"].get("snowfall_sum", [0])[0]
+  embeds = []
 
-  hourly_temps = data["hourly"]["temperature_2m"][0:24]
-  hourly_hums = data["hourly"]["relative_humidity_2m"][0:24]
-  pressures = data["hourly"]["pressure_msl"][0:24]
-  weather_codes = data["hourly"]["weather_code"][0:24]
-  wind_speeds = data["hourly"]["wind_speed_10m"][0:24]
-  wind_dirs = data["hourly"]["wind_direction_10m"][0:24]
-  cloud_covers = data["hourly"]["cloud_cover"][0:24]
-  precips = data["hourly"]["precipitation"][0:24]
+  # --- 1. 概要 Embed (オレンジ色・今日、明日、あさっての3日分を1つにまとめる) ---
+  embed1 = discord.Embed(title="3日間天気予報 概要", color=discord.Color.orange())
 
-  max_hum = max(hourly_hums)
-  min_hum = min(hourly_hums)
-  max_press = max(pressures)
-  min_press = min(pressures)
-  avg_press = round(sum(pressures) / len(pressures), 1)
+  overview_texts = []
+  # 0:今日, 1:明日, 2:あさって の3日分を作成
+  day_labels = ["今日", "明日", "あさって"]
 
-  # 情報（真冬日、冬日、夏日、真夏日、猛暑日、酷暑日、熱帯夜）の判定
-  info_tags = []
-  if max_temp >= 35.0:
-    info_tags.append("猛暑日")  # または酷暑日
-  elif max_temp >= 30.0:
-    info_tags.append("真夏日")
-  elif max_temp >= 25.0:
-    info_tags.append("夏日")
+  for day_idx in range(min(3, len(daily_times))):
+    d_str = daily_times[day_idx]
+    d_dt = datetime.strptime(d_str, "%Y-%m-%d")
+    label = day_labels[day_idx] if day_idx < len(day_labels) else f"{day_idx}日後"
 
-  if min_temp < 0.0:
-    if max_temp < 0.0:
-      info_tags.append("真冬日")
-    else:
-      info_tags.append("冬日")
+    max_temp = data["daily"]["temperature_2m_max"][day_idx]
+    min_temp = data["daily"]["temperature_2m_min"][day_idx]
+    total_precip = data["daily"].get("precipitation_sum", [0])[day_idx]
+    total_snow = data["daily"].get("snowfall_sum", [0])[day_idx]
 
-  if min_temp >= 25.0:
-    info_tags.append("熱帯夜")
+    # その日の24時間のインデックス範囲 (day_idx * 24 から 24時間)
+    start_h = day_idx * 24
+    end_h = start_h + 24
 
-  info_str = ", ".join(info_tags) if info_tags else "特になし"
+    day_hums = data["hourly"]["relative_humidity_2m"][start_h:end_h]
+    day_pressures = data["hourly"]["pressure_msl"][start_h:end_h]
+    day_codes = data["hourly"]["weather_code"][start_h:end_h]
 
-  # 気圧変化量計算
-  hourly_diffs = [
-      0.0 if i == 0 else round(pressures[i] - pressures[i - 1], 1)
-      for i in range(24)
-  ]
+    max_hum = max(day_hums) if day_hums else 0
+    min_hum = min(day_hums) if day_hums else 0
+    max_press = max(day_pressures) if day_pressures else 0
+    min_press = min(day_pressures) if day_pressures else 0
+    avg_press = (
+        round(sum(day_pressures) / len(day_pressures), 1)
+        if day_pressures
+        else 0
+    )
 
-  max_drop_val, max_drop_str = 0.0, "なし"
-  max_rise_val, max_rise_str = 0.0, "なし"
+    # 情報（真冬日、冬日、夏日、真夏日、猛暑日、酷暑日、熱帯夜）
+    info_tags = []
+    if max_temp >= 35.0:
+      info_tags.append("猛暑日")
+    elif max_temp >= 30.0:
+      info_tags.append("真夏日")
+    elif max_temp >= 25.0:
+      info_tags.append("夏日")
+    if min_temp < 0.0:
+      if max_temp < 0.0:
+        info_tags.append("真冬日")
+      else:
+        info_tags.append("冬日")
+    if min_temp >= 25.0:
+      info_tags.append("熱帯夜")
+    info_str = ", ".join(info_tags) if info_tags else "特になし"
 
-  for i in range(1, 24):
-    diff = hourly_diffs[i]
-    t_prev = f"{i-1:02d}:00"
-    t_curr = f"{i:02d}:00"
-    if diff < max_drop_val:
-      max_drop_val = diff
-      max_drop_str = (
-          f"{judge_pressure_hourly(diff)}({diff:+.1f}hPa, {t_prev}と{t_curr}の間)"
-      )
-    if diff > max_rise_val:
-      max_rise_val = diff
-      max_rise_str = (
-          f"{judge_pressure_hourly(diff)}({diff:+.1f}hPa, {t_prev}と{t_curr}の間)"
-      )
+    main_weather_emoji = get_weather_emoji(day_codes[0] if day_codes else 0)
 
-  daily_diff = round(pressures[-1] - pressures[0], 1)
-  max_daily_str = f"{judge_pressure_daily(daily_diff)}({daily_diff:+.1f}hPa)"
-  lowest_diff = min(hourly_diffs)
-  max_alert_level = judge_pressure_hourly(lowest_diff)
+    # 気圧変化
+    day_diffs = [
+        0.0 if i == 0 else round(day_pressures[i] - day_pressures[i - 1], 1)
+        for i in range(len(day_pressures))
+    ]
+    max_drop_val, max_drop_str = 0.0, "なし"
+    max_rise_val, max_rise_str = 0.0, "なし"
 
-  main_weather_emoji = get_weather_emoji(data["daily"]["weather_code"][0])
-
-  # --- 1. 概要 Embed (オレンジ) ---
-  embed1 = discord.Embed(
-      title=f"今日({target_date.strftime('%m月%d日')})の天気予報",
-      color=discord.Color.orange(),
-  )
-  overview_desc = (
-      f"天気: 晴れときどき曇り {main_weather_emoji}\n"
-      f"最高気温: {max_temp}℃｜最低気温: {min_temp}℃｜最高湿度: {max_hum}%｜最低湿度:"
-      f" {min_hum}%\n"
-      f"降水量: {total_precip}mm｜降雪量: {total_snow}cm｜情報: {info_str}\n"
-      f"最大気圧: {max_press}hPa｜最低気圧: {min_press}hPa｜平均気圧:"
-      f" {avg_press}hPa\n\n"
-      f"今日の最大警戒レベル: {max_alert_level}\n"
-      f"最大変化[時間,低下]: {max_drop_str}\n"
-      f"最大変化[時間,増加]: {max_rise_str}\n"
-      f"最大変化[今日]: {max_daily_str}"
-  )
-  embed1.description = overview_desc
-  # 概要のフッターに時点を追加
-  embed1.set_footer(text=f"{now_jst.strftime('%Y年%m月%d日 %H:%M')} 時点")
-
-  # --- 共通のブロック生成関数（3列風レイアウト / 横並び） ---
-  def build_grid_blocks(start_hour, end_hour):
-    blocks = []
-    # 3つずつグループ化して横並び風にする
-    for i in range(start_hour, end_hour, 3):
-      line_parts = []
-      for j in range(3):
-        idx = i + j
-        if idx >= end_hour:
-          break
-        t_str = f"{idx:02d}:00"
-        emoji = get_weather_emoji(weather_codes[idx])
-        diff = hourly_diffs[idx]
-        level = judge_pressure_hourly(diff)
-        w_dir = get_wind_direction(wind_dirs[idx])
-
-        # 1時間ごとのコンパクトなレイアウト
-        cell = (
-            f"**{t_str}** {emoji}\n"
-            f"気温:{hourly_temps[idx]}℃ 湿:{hourly_hums[idx]}%\n"
-            f"風:{wind_speeds[idx]}m {w_dir}\n"
-            f"雲:{cloud_covers[idx]}% 降:{precips[idx]}mm\n"
-            f"気圧:{pressures[idx]}hPa ({level}{diff:+.1f})"
+    for i in range(1, len(day_diffs)):
+      diff = day_diffs[i]
+      t_prev = f"{i-1:02d}:00"
+      t_curr = f"{i:02d}:00"
+      if diff < max_drop_val:
+        max_drop_val = diff
+        max_drop_str = (
+            f"{judge_pressure_hourly(diff)}({diff:+.1f}hPa,"
+            f" {t_prev}と{t_curr}の間)"
         )
-        line_parts.append(cell)
-      # 3つをスペースや空白行で並べる
-      blocks.append(" | ".join(line_parts))
-    return "\n\n".join(blocks)
+      if diff > max_rise_val:
+        max_rise_val = diff
+        max_rise_str = (
+            f"{judge_pressure_hourly(diff)}({diff:+.1f}hPa,"
+            f" {t_prev}と{t_curr}の間)"
+        )
 
-  # --- 2. 午前 Embed (緑：00:00〜11:00) ---
-  embed2 = discord.Embed(title="【午前】", color=discord.Color.green())
-  embed2.description = build_grid_blocks(0, 12)
+    daily_diff = (
+        round(day_pressures[-1] - day_pressures[0], 1) if day_pressures else 0.0
+    )
+    max_daily_str = f"{judge_pressure_daily(daily_diff)}({daily_diff:+.1f}hPa)"
+    lowest_diff = min(day_diffs) if day_diffs else 0.0
+    max_alert_level = judge_pressure_hourly(lowest_diff)
 
-  # --- 3. 午後 Embed (青：12:00〜23:00) ---
-  embed3 = discord.Embed(title="【午後】", color=discord.Color.blue())
-  embed3.description = build_grid_blocks(12, 24)
+    # ご指定のシンプルで見やすい3行形式
+    block_text = (
+        f"**{label}({d_dt.strftime('%m月%d日')})の天気予報**\n"
+        f"天気: 晴れときどき曇り {main_weather_emoji}\n"
+        f"最高気温: {max_temp}℃｜最低気温: {min_temp}℃｜最高湿度: {max_hum}%｜最低湿度:"
+        f" {min_hum}%\n"
+        f"降水量: {total_precip}mm｜降雪量: {total_snow}cm｜情報: {info_str}\n"
+        f"最大気圧: {max_press}hPa｜最低気圧: {min_press}hPa｜平均気圧:"
+        f" {avg_press}hPa\n\n"
+        f"今日の最大警戒レベル: {max_alert_level[0]}\n"  # 絵文字の数字部分や記号
+        f"最大変化[時間,低下]: {max_drop_str}\n"
+        f"最大変化[時間,増加]: {max_rise_str}\n"
+        f"最大変化[今日]: {max_daily_str}"
+    )
+    overview_texts.append(block_text)
 
-  return [embed1, embed2, embed3]
+  embed1.description = "\n\n".join(overview_texts)
+  embed1.set_footer(text=f"{now_jst.strftime('%Y年%m月%d日 %H:%M')} 時点")
+  embeds.append(embed1)
+
+  # --- 2. 時間ごとの天気（今日の分をコードブロック等を用いて綺麗に3列に並べる） ---
+  # 画像のようにきれいに整列させるため、Markdownのコードブロックを活用します
+  def build_clean_columns(start_hour, end_hour):
+    hours_data = []
+    for idx in range(start_hour, end_hour):
+      t_str = f"{idx:02d}:00"
+      emoji = get_weather_emoji(data["hourly"]["weather_code"][idx])
+      temp = data["hourly"]["temperature_2m"][idx]
+      hum = data["hourly"]["relative_humidity_2m"][idx]
+      precip = data["hourly"]["precipitation"][idx]
+      wind_spd = data["hourly"]["wind_speed_10m"][idx]
+      wind_d = get_wind_direction(data["hourly"]["wind_direction_10m"][idx])
+
+      hours_data.append({
+          "time": t_str,
+          "emoji": emoji,
+          "temp": f"{temp}°C",
+          "hum": f"{hum}%",
+          "precip": f"{precip}mm",
+          "wind": f"{wind_d} {wind_spd}m/s",
+      })
+
+    # 3つずつ並べたテーブル風レイアウトを作成
+    lines = []
+    for i in range(0, len(hours_data), 3):
+      chunk = hours_data[i : i + 3]
+      # 1行目: 時間と絵文字
+      line_t = " | ".join(f"{c['time']} {c['emoji']}" for c in chunk)
+      # 2行目: 気温・湿度
+      line_th = " | ".join(f"気温:{c['temp']} 湿:{c['hum']}" for c in chunk)
+      # 3行目: 降水量
+      line_p = " | ".join(f"降水:{c['precip']}" for c in chunk)
+      # 4行目: 風
+      line_w = " | ".join(f"風:{c['wind']}" for c in chunk)
+
+      lines.append(f"{line_t}\n{line_th}\n{line_p}\n{line_w}")
+      lines.append("-" * 32)  ミア仕切り
+
+    return "```\n" + "\n".join(lines) + "\n```"
+
+  # 午前 Embed (緑)
+  embed2 = discord.Embed(title="【午前】(00:00 - 11:00)", color=discord.Color.green())
+  embed2.description = build_clean_columns(0, 12)
+  embeds.append(embed2)
+
+  # 午後 Embed (青)
+  embed3 = discord.Embed(title="【午後】(12:00 - 23:00)", color=discord.Color.blue())
+  embed3.description = build_clean_columns(12, 24)
+  embeds.append(embed3)
+
+  return embeds
 
 
 @bot.event
@@ -318,7 +343,7 @@ async def unset_channel(ctx):
 
 @bot.command(name="天気テスト")
 async def test_weather(ctx):
-  await ctx.send("🔍 テスト生成中...")
+  await ctx.send("🔍 テスト生成中（3日分概要＆3列レイアウト）...")
   try:
     embeds = generate_weather_embeds()
     for emb in embeds:
