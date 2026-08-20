@@ -10,7 +10,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 通知先チャンネルIDを保存するファイル（シンプルな永続化用）
+# 通知先チャンネルIDを保存するファイル
 CONFIG_FILE = "channel_id.txt"
 
 
@@ -29,7 +29,7 @@ def save_channel_id(channel_id):
     f.write(str(channel_id))
 
 
-# 天気・気圧データの取得とフォーマット生成（前回のロジックを統合）
+# 天気・気圧データの取得とフォーマット生成
 def generate_weather_report():
   url = "https://api.open-meteo.com/v1/forecast?latitude=35.3&longitude=139.375&current=temperature_2m,relative_humidity_2m,pressure_msl&hourly=temperature_2m,relative_humidity_2m,weather_code,pressure_msl&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=Asia/Tokyo"
   res = requests.get(url)
@@ -60,10 +60,10 @@ def generate_weather_report():
   )
   report.append("今日の最大警戒レベル: 4🟠(最大変化[時間,低下])")
   report.append("最大変化[時間,低下]: 4🟠(-1.1hPa,10時と11時の間)")
-  report.append("最大変化[時間,増加]: 1🔵(+0.8hPa, 19時と20の間)")
+  report.append("最大変化[時間,増加]: 1🔵(+0.8hPa, 19時と20時の間)")
   report.append("最大変化[今日]: 2🟢(-2.2hPa)\n")
 
-  # 1時間ごとの情報（一部簡略化、または全時間帯）
+  # 1時間ごとの情報
   hourly_times = data["hourly"]["time"]
   temps = data["hourly"]["temperature_2m"]
   hums = data["hourly"]["relative_humidity_2m"]
@@ -122,6 +122,17 @@ async def unset_channel(ctx):
   if os.path.exists(CONFIG_FILE):
     os.remove(CONFIG_FILE)
   await ctx.send("🚫 天気予報の通知設定を解除しました。")
+
+
+@bot.command(name="天気テスト")
+async def test_weather(ctx):
+  """その場で天気予報を投稿して内容をテストします"""
+  await ctx.send("🔍 テスト生成中...")
+  try:
+    report = generate_weather_report()
+    await ctx.send(report)
+  except Exception as e:
+    await ctx.send(f"❌ エラーが発生しました: {e}")
 
 
 # Renderの環境変数からトークンを取得して起動
