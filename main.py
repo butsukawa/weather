@@ -287,7 +287,7 @@ def generate_weather_embeds():
       line_w = " | ".join(f"風:{c['wind']}" for c in chunk)
 
       lines.append(f"{line_t}\n{line_th}\n{line_p}\n{line_w}")
-      lines.append("-" * 32)  ミア仕切り
+      lines.append("-" * 32)  #ミア仕切り
 
     return "```\n" + "\n".join(lines) + "\n```"
 
